@@ -20,13 +20,17 @@ import { UIManager } from './UIManager.js';
 export class VideoConferenceApp {
     /**
      * Construye la aplicación, inicializando todos los gestores necesarios.
-     * @param {HTMLVideoElement} localVideoElement - El elemento de video donde se mostrará el stream local.
      */
-    constructor(localVideoElement) {
-        this.localVideoElement = localVideoElement;
+    constructor() {
+        this.localVideoElement = null;
         this.peerManager = new PeerConnectionManager();
         this.wsManager = new WebSocketManager(config.WEBSOCKET_URL);
         this.rtcManager = new WebRTCManager(this.peerManager, UIManager, this.wsManager);
+        this.isAudioEnabled = true;
+        this.isVideoEnabled = true;
+        this.isScreenSharing = false;
+        this.originalStream = null;
+        this.username = 'Usuario';
     }
 
     /**
@@ -50,12 +54,18 @@ export class VideoConferenceApp {
     async setupLocalMedia() {
         try {
             const stream = await this.peerManager.setupLocalStream();
+            this.originalStream = stream;
+            
+            // Crear elemento de video local
+            this.localVideoElement = UIManager.createVideoElement('local', true);
             this.localVideoElement.srcObject = stream;
+            
             console.log('Stream local obtenido y listo.');
+            UIManager.showNotification('Conectado exitosamente', 'success');
         } catch (error) {
             console.error('Error al configurar el stream local:', error);
-            alert('No se pudo acceder a la cámara y al micrófono. Por favor, verifica los permisos y refresca la página.');
-            throw error; // Detener la ejecución si no se puede obtener el stream.
+            UIManager.showNotification('No se pudo acceder a la cámara y al micrófono', 'error');
+            throw error;
         }
     }
 
@@ -75,6 +85,7 @@ export class VideoConferenceApp {
         this.wsManager.onMessage('user-joined', (message) => {
             console.log('Procesando evento: user-joined', message);
             this.rtcManager.handleUserJoined(message.userId);
+            UIManager.showNotification(`Usuario ${message.userId.substring(0, 6)} se unió a la llamada`, 'info');
         });
 
         // Evento: Al entrar, el servidor nos envía una lista de los usuarios que ya estaban en la sala.
@@ -87,33 +98,208 @@ export class VideoConferenceApp {
         this.wsManager.onMessage('user-left', (message) => {
             console.log('Procesando evento: user-left', message);
             this.rtcManager.handleUserLeft(message.userId);
+            UIManager.showNotification(`Usuario ${message.userId.substring(0, 6)} salió de la llamada`, 'info');
         });
 
         // Evento: Recibimos una "oferta" de otro par para iniciar una conexión WebRTC.
-        // Una 'offer' es un mensaje (con formato SDP) que describe cómo un par quiere comunicarse
-        // (qué codecs de audio/video soporta, etc.). Es el primer paso para establecer una conexión.
         this.wsManager.onMessage('offer', (message) => {
             console.log('Procesando evento: offer (oferta)', message);
             this.rtcManager.handleOffer(message.fromUserId, message.offer);
         });
 
         // Evento: Recibimos una "respuesta" a una oferta que enviamos previamente.
-        // Una 'answer' es la respuesta a una 'offer'. El par que la recibe confirma los parámetros
-        // de comunicación y envía su propia descripción de sesión (SDP). Con la oferta y la respuesta,
-        // ambos pares saben cómo comunicarse.
         this.wsManager.onMessage('answer', (message) => {
             console.log('Procesando evento: answer (respuesta)', message);
             this.rtcManager.handleAnswer(message.fromUserId, message.answer);
         });
 
         // Evento: Recibimos un "candidato ICE".
-        // ICE (Interactive Connectivity Establishment) es el protocolo que usa WebRTC para encontrar
-        // la mejor ruta de conexión posible entre dos pares, incluso si están detrás de firewalls o NAT.
-        // Un 'candidato ICE' es una dirección de red (IP y puerto) que podría usarse para la conexión.
-        // Los pares intercambian múltiples candidatos y eligen el que funcione.
         this.wsManager.onMessage('ice-candidate', (message) => {
             console.log('Procesando evento: ice-candidate (candidato ICE)', message);
             this.rtcManager.handleIceCandidate(message.fromUserId, message.candidate);
         });
+        
+        // Evento: Mensaje de chat
+        this.wsManager.onMessage('chat-message', (message) => {
+            console.log('Procesando evento: chat-message', message);
+            UIManager.addChatMessage(message.message, message.fromUserId, false);
+        });
+        
+        // Evento: Actualización de nombre de usuario
+        this.wsManager.onMessage('username-update', (message) => {
+            console.log('Procesando evento: username-update', message);
+            UIManager.updateVideoLabel(message.userId, message.username);
+        });
+    }
+    
+    /**
+     * Toggle audio (mute/unmute)
+     */
+    toggleAudio() {
+        const audioTrack = this.peerManager.localStream?.getAudioTracks()[0];
+        if (audioTrack) {
+            audioTrack.enabled = !audioTrack.enabled;
+            this.isAudioEnabled = audioTrack.enabled;
+            
+            const btn = document.getElementById('toggleAudioBtn');
+            if (this.isAudioEnabled) {
+                btn.innerHTML = '<i class="fas fa-microphone"></i>';
+                btn.classList.remove('active');
+            } else {
+                btn.innerHTML = '<i class="fas fa-microphone-slash"></i>';
+                btn.classList.add('active');
+            }
+            
+            UIManager.showNotification(
+                this.isAudioEnabled ? 'Micrófono activado' : 'Micrófono silenciado',
+                'info'
+            );
+        }
+    }
+    
+    /**
+     * Toggle video (on/off)
+     */
+    toggleVideo() {
+        const videoTrack = this.peerManager.localStream?.getVideoTracks()[0];
+        if (videoTrack) {
+            videoTrack.enabled = !videoTrack.enabled;
+            this.isVideoEnabled = videoTrack.enabled;
+            
+            const btn = document.getElementById('toggleVideoBtn');
+            if (this.isVideoEnabled) {
+                btn.innerHTML = '<i class="fas fa-video"></i>';
+                btn.classList.remove('active');
+            } else {
+                btn.innerHTML = '<i class="fas fa-video-slash"></i>';
+                btn.classList.add('active');
+            }
+            
+            UIManager.showNotification(
+                this.isVideoEnabled ? 'Cámara activada' : 'Cámara desactivada',
+                'info'
+            );
+        }
+    }
+    
+    /**
+     * Toggle screen sharing
+     */
+    async toggleScreenShare() {
+        try {
+            if (!this.isScreenSharing) {
+                // Iniciar compartir pantalla
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { cursor: 'always' },
+                    audio: false
+                });
+                
+                const screenTrack = screenStream.getVideoTracks()[0];
+                
+                // Reemplazar track de video en todas las conexiones
+                this.peerManager.peerConnections.forEach((pc) => {
+                    const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                    if (sender) {
+                        sender.replaceTrack(screenTrack);
+                    }
+                });
+                
+                // Actualizar video local
+                if (this.localVideoElement) {
+                    this.localVideoElement.srcObject = screenStream;
+                }
+                
+                // Detectar cuando el usuario deja de compartir
+                screenTrack.onended = () => {
+                    this.stopScreenShare();
+                };
+                
+                this.isScreenSharing = true;
+                const btn = document.getElementById('shareScreenBtn');
+                btn.classList.add('active');
+                btn.innerHTML = '<i class="fas fa-stop"></i>';
+                
+                UIManager.showNotification('Compartiendo pantalla', 'success');
+            } else {
+                this.stopScreenShare();
+            }
+        } catch (error) {
+            console.error('Error al compartir pantalla:', error);
+            UIManager.showNotification('Error al compartir pantalla', 'error');
+        }
+    }
+    
+    /**
+     * Stop screen sharing
+     */
+    stopScreenShare() {
+        if (this.originalStream) {
+            const videoTrack = this.originalStream.getVideoTracks()[0];
+            
+            // Restaurar track de video original
+            this.peerManager.peerConnections.forEach((pc) => {
+                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                if (sender) {
+                    sender.replaceTrack(videoTrack);
+                }
+            });
+            
+            // Restaurar video local
+            if (this.localVideoElement) {
+                this.localVideoElement.srcObject = this.originalStream;
+            }
+        }
+        
+        this.isScreenSharing = false;
+        const btn = document.getElementById('shareScreenBtn');
+        btn.classList.remove('active');
+        btn.innerHTML = '<i class="fas fa-desktop"></i>';
+        
+        UIManager.showNotification('Pantalla compartida detenida', 'info');
+    }
+    
+    /**
+     * Send chat message
+     */
+    sendChatMessage(message) {
+        this.wsManager.send({
+            type: 'chat-message',
+            message: message
+        });
+        
+        UIManager.addChatMessage(message, this.rtcManager.myUserId, true);
+    }
+    
+    /**
+     * Update username
+     */
+    updateUsername(username) {
+        this.username = username;
+        this.wsManager.send({
+            type: 'username-update',
+            username: username
+        });
+        
+        UIManager.updateVideoLabel('local', username);
+    }
+    
+    /**
+     * Leave the call
+     */
+    leave() {
+        // Detener todos los tracks
+        if (this.peerManager.localStream) {
+            this.peerManager.localStream.getTracks().forEach(track => track.stop());
+        }
+        
+        // Cerrar todas las conexiones
+        this.peerManager.peerConnections.forEach((pc, userId) => {
+            pc.close();
+        });
+        
+        // Cerrar WebSocket
+        this.wsManager.close();
+        
+        UIManager.showNotification('Has salido de la llamada', 'info');
     }
 }
