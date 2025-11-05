@@ -4,7 +4,7 @@
 
 const config = {
     // URL del servidor WebSocket para señalización
-    WEBSOCKET_URL: 'ws://localhost:8000',
+    WEBSOCKET_URL: 'https://call-server-cmaxdrbsbteacvas.chilecentral-01.azurewebsites.net/',
     
     // Configuración de servidores ICE (STUN/TURN)
     ICE_SERVERS: [
